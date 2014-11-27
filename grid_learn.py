@@ -43,12 +43,16 @@ def learn_label(label_prefix, label_path, feature_path, label, fold=None, fold_c
         test_label_set = numpy.ravel(labels.iloc[test_idx])
         test_obs_set = observations.iloc[test_idx]
 
-    train_label_count = sum(numpy.ravel(train_label_set != 0))
-    test_label_count = sum(numpy.ravel(test_label_set != 0))
+    train_pos_label_count = sum(numpy.ravel(train_label_set != 0))
+    test_pos_label_count = sum(numpy.ravel(test_label_set != 0))
+    train_neg_label_count = sum(numpy.ravel(train_label_set == 0))
+    test_neg_label_count = sum(numpy.ravel(test_label_set == 0))
 
     rval = {
-        'train_label_count' : train_label_count,
-        'test_label_count' : test_label_count,
+        'train_pos_label_count' : train_pos_label_count,
+        'test_pos_label_count' : test_pos_label_count,
+        'train_neg_label_count' : train_neg_label_count,
+        'test_neg_label_count' : test_neg_label_count,
     }
     if label_prefix is not None:
         rval['label'] = label_prefix + ":" + label
@@ -60,13 +64,15 @@ def learn_label(label_prefix, label_path, feature_path, label, fold=None, fold_c
         rval['fold_count'] = fold_count
         rval['label'] = rval['label'] + ":" + str(fold)
 
-    if train_label_count > 2 and test_label_count > 2:
+    if train_pos_label_count > 2 and test_pos_label_count > 2:
         lr = LogisticRegression(penalty=penalty, C=C)
         lr.fit(train_obs_set, train_label_set)
 
         pred=lr.predict_proba( test_obs_set )
         fpr, tpr, thresholds = metrics.roc_curve(test_label_set, list( a[1] for a in pred ))
         roc_auc = metrics.auc(fpr, tpr)
+        
+        predictions = zip( test_label_set, list( a[1] for a in pred ) )
 
         prec, recall, thresholds = metrics.precision_recall_curve(test_label_set, list( a[1] for a in pred ))
         pr_auc = metrics.auc(prec, recall, reorder=True)
@@ -80,6 +86,7 @@ def learn_label(label_prefix, label_path, feature_path, label, fold=None, fold_c
         rval['intercept'] = lr.intercept_[0]
         rval['non_zero'] = non_zero
         rval['method'] = 'LogisticRegression'
+        rval['predictions'] = predictions
 
     return rval
 
