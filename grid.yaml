@@ -1,0 +1,32 @@
+
+methods:
+    -
+        name: LogisticRegression #sklearn.linear_model.LogisticRegression
+        params:
+            penalty: l2
+            C: 1.0
+    -
+        name: SVC #sklearn.svm.SVC
+        params:
+            kernel: linear
+            probability: True
+    #-
+    #    name: SVC #sklearn.svm.SVC
+    #    params:
+    #        kernel: rbf
+    #        probability: True
+
+    #-
+    #    name: SVC #sklearn.svm.SVC
+    #    params:
+    #        kernel: poly
+    #        probability: True
+
+    #-
+    #    name: LDA #sklearn.lda.LDA
+
+    #-
+    #    name: GaussianNB #sklearn.naive_bayes.GaussianNB
+
+    #-
+    #    name: RandomForestClassifier # sklearn.ensemble.RandomForestClassifier

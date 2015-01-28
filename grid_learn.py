@@ -6,36 +6,76 @@ import argparse
 import pandas
 import numpy
 import json
-from sklearn.linear_model import LogisticRegression
+import yaml
+import logging
+
+import sklearn.linear_model
+import sklearn.svm
+import sklearn.lda
+import sklearn.naive_bayes
+import sklearn.ensemble
+
 from sklearn import cross_validation
 from sklearn import metrics
 
 
+method_config = {
+    'LogisticRegression' : {
+        'method' : sklearn.linear_model.LogisticRegression
+    },
+    'SVC' : {
+        'method' : sklearn.svm.SVC
+    },
+    'LDA' : {
+        'method' : sklearn.lda.LDA
+    },
+    'GaussianNB' : {
+        'method' : sklearn.naive_bayes.GaussianNB
+    },
+    'RandomForestClassifier' : {
+        'method' : sklearn.ensemble.RandomForestClassifier
+    }
+}
 
-def learn_partition(partition, transpose, fold_count, penalty, C):
+
+def dict_update(source, diffs):
+    result=dict(source)
+    result.update(diffs)
+    return result
+
+def dict_remove(source, rm):
+    result=dict(source)
+    for i in rm:
+        del result[i]
+    return result
+
+
+def learn_partition(partition):
     #rdd format: label_prefix, label, label_file_path, feature_file_path, fold_number
     cur_label_path = None
     cur_label_matrix = None
     cur_feature_path = None
     cur_feature_matrix = None
 
-    for label_prefix, label, label_file_path, feature_file_path, fold_number in partition:
-        if label_file_path != cur_label_path:
-            cur_label_matrix = pandas.read_csv(label_file_path, sep="\t", index_col=0)
-            if transpose:
+    #label_prefix, label, label_file_path, feature_file_path, fold_number
+    for task in partition:
+        if task['label_path'] != cur_label_path:
+            cur_label_matrix = pandas.read_csv(task['label_path'], sep="\t", index_col=0)
+            if task['transpose']:
                 cur_label_matrix = cur_label_matrix.transpose()
-            cur_label_path = label_file_path
-        if feature_file_path != cur_feature_path:
-            cur_feature_matrix = pandas.read_csv(feature_file_path, sep="\t", index_col=0)
-            if transpose:
+            cur_label_path = task['label_path']
+        if task['feature_path'] != cur_feature_path:
+            cur_feature_matrix = pandas.read_csv(task['feature_path'], sep="\t", index_col=0)
+            if task['transpose']:
                 cur_feature_matrix = cur_feature_matrix.transpose()
-            cur_feature_path = feature_file_path
-        yield learn_label(label_prefix=label_prefix, label_matrix=cur_label_matrix,
-            feature_matrix=cur_feature_matrix, label=label, fold=fold_number,
-            fold_count=fold_count, penalty=penalty, C=C)
+            cur_feature_path = task['feature_path']
+        yield learn_label(
+            label_matrix=cur_label_matrix,
+            feature_matrix=cur_feature_matrix,
+            **dict_remove(task, ["transpose", "feature_path", "label_path"]))
 
 
-def learn_label_path(label_prefix, label_path, feature_path, label, fold=None, fold_count=None, transpose=False, penalty="l2", C=1.0):
+def learn_label_path(label_prefix, label_path, feature_path, label, method, params, fold=None, fold_count=None, transpose=False):
     feature_matrix = pandas.read_csv(feature_path, sep="\t", index_col=0).fillna(0.0)
     label_matrix = pandas.read_csv(label_path, sep="\t", index_col=0)
 
@@ -46,10 +86,10 @@ def learn_label_path(label_prefix, label_path, feature_path, label, fold=None, f
     return learn_label(label_prefix=label_prefix,
         label_matrix=label_matrix,
         feature_matrix=feature_matrix, label=label,
-        fold=fold, fold_count=fold_count, penalty=penalty, C=C)
+        fold=fold, fold_count=fold_count, method=method, params=params)
 
 
-def learn_label(label_prefix, label_matrix, feature_matrix, label, fold=None, fold_count=None, penalty="l2", C=1.0):
+def learn_label(label_prefix, label_matrix, feature_matrix, label, method, params, fold=None, fold_count=None):
 
     isect = feature_matrix.index.intersection(label_matrix.index)
 
@@ -88,10 +128,12 @@ def learn_label(label_prefix, label_matrix, feature_matrix, label, fold=None, fo
     if fold is not None and fold_count is not None:
         rval['fold'] = fold
         rval['fold_count'] = fold_count
-        rval['label'] = rval['label'] + ":" + str(fold)
+        rval['name'] = rval['label'] + ":" + str(fold)
+    else:
+        rval['name'] = rval['label']
 
     if train_pos_label_count > 2 and test_pos_label_count > 2:
-        lr = LogisticRegression(penalty=penalty, C=C)
+        lr = method_config[method]['method']( **params )
         lr.fit(train_obs_set, train_label_set)
 
         pred=lr.predict_proba( test_obs_set )
@@ -111,7 +153,8 @@ def learn_label(label_prefix, label_matrix, feature_matrix, label, fold=None, fo
         rval['coef']  = coef
         rval['intercept'] = lr.intercept_[0]
         rval['non_zero'] = non_zero
-        rval['method'] = 'LogisticRegression'
+        rval['method'] = method
+        rval['params'] = params
         rval['predictions'] = predictions
 
     return rval
@@ -123,15 +166,21 @@ if __name__ == "__main__":
     parser.add_argument("-ln", "--labels-named", nargs=2, action="append", default=[])
     parser.add_argument("--transpose", "-t", action="store_true", default=False)
     parser.add_argument("--single", default=None)
-    parser.add_argument("--penalty", "-p", default="l2")
-    parser.add_argument("-C", type=float, default=1.0)
+    parser.add_argument("--grid", default=None)
     parser.add_argument("--spark-master", "-s", default="local")
     parser.add_argument("--max-cores", default=None)
     parser.add_argument("--folds", type=int, default=10)
+    parser.add_argument("--test", action="store_true", default=False)
     parser.add_argument("-o", "--out", default="models")
 
     args = parser.parse_args()
     args.out = os.path.abspath(args.out)
+
+    logging.basicConfig(level=logging.INFO)
+
+    with open(args.grid) as handle:
+        txt = handle.read()
+        grid_config = yaml.load(txt)
 
     label_files = []
     feature_files = []
@@ -147,11 +196,12 @@ if __name__ == "__main__":
     #grid: label_prefix, label, label_file_path, feature_file_path
     grid = []
     for label_prefix, label_path in label_files:
-        print "Scanning", label_path
+        logging.info("Scanning: %s" % (label_path))
         label_matrix = pandas.read_csv(label_path, sep="\t", index_col=0)
         if args.transpose:
             label_matrix = label_matrix.transpose()
         for feature_path in feature_files:
+            logging.info("Scanning: %s" % (feature_path))
             feature_matrix = pandas.read_csv(feature_path, sep="\t", index_col=0)
             if args.transpose:
                 feature_matrix = feature_matrix.transpose()
@@ -159,18 +209,46 @@ if __name__ == "__main__":
             if len(sample_intersect) > 5:
                 label_set = []
                 for l in label_matrix.columns:
-                    if sum( numpy.ravel(label_matrix[l] != 0) ) > 20:
-                        grid.append( [label_prefix, l, label_path, feature_path] )
+                    logging.info("Checking: %s" % (l))
+                    if args.single is None or l == args.single:
+                        if sum( numpy.ravel(label_matrix[l] != 0) ) > 20:
+                            label_set.append(l)
+
+
+                for method in grid_config.get('methods'):
+                    logging.info("Setting up: %s" % (method['name']))
+                    method = {
+                        'label_prefix' : label_prefix,
+                        'label_path' : label_path,
+                        'feature_path' : feature_path,
+                        'method' : method['name'],
+                        'params' : method.get('params', {}),
+                        'transpose' : args.transpose
+                    }
+                    for l in label_set:
+                        n = dict(method)
+                        n['label'] = l
+                        grid.append(n)
+
+    if args.test:
+        for line in grid:
+            print line
+        sys.exit(0)
 
     if args.single:
-        for label_prefix, label, label_file_path, feature_file_path in grid:
-            if label == args.single:
+        for learn_request in grid:
+            if learn_request['label'] == args.single:
+                print json.dumps(
+                    learn_label_path(**learn_request)
+                )
+                """
                 print json.dumps(
                     learn_label_path(
                         label_path=label_file_path, feature_path=feature_file_path, label=args.single,
                         fold=0, fold_count=args.folds, transpose=args.transpose, label_prefix=label_prefix,
                         penalty=args.penalty, C=args.C )
                     )
+                """
     else:
         from pyspark import SparkConf, SparkContext
 
@@ -185,16 +263,14 @@ if __name__ == "__main__":
 
         label_rdd = sc.parallelize(list(grid), len(grid))
         if args.folds > 0:
-            task_rdd = label_rdd.flatMap( lambda x: list( x + [i] for i in range(args.folds) + [None] ) )
+            task_rdd = label_rdd.flatMap( lambda x: list( dict_update(x, {"fold" : i, "fold_count" : args.folds}) for i in range(args.folds) + [None] ) )
         else:
-            task_rdd = label_rdd.map( lambda x: x + [None] )
+            task_rdd = label_rdd
 
         #rdd format: label_prefix, label, label_file_path, feature_file_path, fold_number
         counts = task_rdd.mapPartitions(
             lambda x: learn_partition(
-                partition=x,
-                fold_count=args.folds, transpose=args.transpose,
-                penalty=args.penalty, C=args.C)
+                partition=x)
             )
 
         counts.map( json.dumps ).saveAsTextFile(args.out)
