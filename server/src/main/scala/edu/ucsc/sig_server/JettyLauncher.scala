@@ -18,6 +18,9 @@ import com.fasterxml.jackson.databind.{SerializerProvider, JsonSerializer, Objec
 import com.fasterxml.jackson.core.{JsonGenerator, JsonFactory}
 import com.fasterxml.jackson.databind.module.SimpleModule
 
+import org.apache.commons.math3.stat.correlation.PearsonsCorrelation
+import org.apache.commons.math3.stat.correlation.SpearmansCorrelation
+
 import org.saddle.{Vec, Series}
 
 object JettyLauncher {
@@ -33,6 +36,12 @@ object JettyLauncher {
   JSON_FACTORY.disable(JsonFactory.Feature.CANONICALIZE_FIELD_NAMES)
 
   val JSON_MODULE = new SimpleModule()
+  JSON_MODULE.addSerializer( new JsonSerializer[Map[String,AnyRef]] {
+    override def serialize(t: Map[String,AnyRef], jsonGenerator: JsonGenerator, serializerProvider: SerializerProvider) = {
+      jsonGenerator.writeObject(t.asJava)
+    }
+    override def handledType() = classOf[Map[String,AnyRef]]
+  })
   /*
   JSON_MODULE.addSerializer( new JsonSerializer[SparkGraphElementBase] {
     override def serialize(value: SparkGraphElementBase, jgen: JsonGenerator, provider: SerializerProvider): Unit = {
@@ -46,7 +55,7 @@ object JettyLauncher {
   */
   JSON_MAPPER.registerModule(JSON_MODULE)
 
-  var model_db : RDD[(String, Series[String,Double])] = null
+  var model_db : RDD[(String, Series[String,Double], java.util.Map[String,AnyRef])] = null
 
   def main(args: Array[String]) {
 
@@ -65,7 +74,7 @@ object JettyLauncher {
       new ObjectMapper().readValue(x, classOf[java.util.Map[String,AnyRef]])
     }).filter(_.containsKey("coef")).map( x => {
       val coef = x.get("coef").asInstanceOf[java.util.Map[String,Double]].asScala.toList
-      (x.get("label").asInstanceOf[String], Series( coef :_* ))
+      (x.get("label").asInstanceOf[String], Series( coef :_* ), x.get("params").asInstanceOf[java.util.Map[String,AnyRef]])
     }).coalesce(100).persist(StorageLevel.MEMORY_AND_DISK_SER)
     println("Database Size: " + model_db.count())
     //setup the server
@@ -87,14 +96,41 @@ object JettyLauncher {
         response.setContentType("text/html")
         response.setStatus(HttpServletResponse.SC_OK)
         val sig = request.getReader.readLine()
+        val overlap_a = request.getParameterValues("minoverlap")
+        val overlap = if (overlap_a.length > 0) {
+          overlap_a(0).toInt
+        } else {
+          0L
+        }
+
         val data = new ObjectMapper().readValue(sig, classOf[java.util.Map[String,Double]]).asScala.toList
         val query = Series(data:_*)
         val search = model_db.map( x => {
           val common = query.index.intersect(x._2.index)
-          val dot = query.reindex(common.index).values.dot( x._2.reindex(common.index).values )
-          (x._1, dot)
-        } ).sortBy( x => x._2 )
-        response.getWriter().println(search.take(100).mkString(","))
+          val nquery = query.reindex(common.index).values
+          val nelement = x._2.reindex(common.index).values
+          if (common.index.length > overlap) {
+            val corr_val = new PearsonsCorrelation().correlation(nquery.toSeq.toArray, nelement.toSeq.toArray)
+            (x._1, corr_val, nelement.zipMap(common.index.toVec)( (y,z) => (z,y)).toSeq.toMap,
+              Map( "size" -> x._2.length, "params" -> x._3, "coef" -> x._2.toSeq.toMap ))
+          } else {
+            (x._1, Double.NaN, nelement.zipMap(common.index.toVec)( (y,z) => (z,y)).toSeq.toMap,
+              Map( "size" -> x._2.length ) )
+          }
+        } ).filter( ! _._2.isNaN ).sortBy( x => -x._2 )
+        val outstream = response.getOutputStream
+        val out = JSON_FACTORY.createGenerator(outstream)
+        search.take(100).foreach( x => {
+          val m = Map(
+            "label" -> x._1,
+            "score" -> x._2,
+            "values" -> x._3.asJava,
+            "signature" -> x._4.asJava
+          ).asJava
+          out.writeObject(m)
+          outstream.write("\n".getBytes)
+        }
+        )
       }
     }
 

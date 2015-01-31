@@ -1,6 +1,3 @@
-import AssemblyKeys._ // put this at the top of the file
-
-
 name :="sig_server"
 
 scalaVersion :="2.10.4"
@@ -17,13 +14,11 @@ resolvers ++= Seq(
 libraryDependencies ++= Seq(
     "org.rogach" %% "scallop" % "0.9.5",
     "org.scala-saddle" %% "saddle-core" % "1.3.+",
-    "org.apache.spark" %% "spark-core" % "1.1.0",
+    "org.apache.commons" % "commons-math3" % "3.4.1",
+    "org.apache.spark" %% "spark-core" % "1.2.0",
     "org.scala-lang" % "scala-library" % scalaVersion.value,
     "org.scala-lang" % "scala-compiler" % scalaVersion.value
 )
-
-
-assemblySettings
 
 
 assembleArtifact in packageScala := false
