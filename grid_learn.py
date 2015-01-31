@@ -132,13 +132,16 @@ def learn_label(label_prefix, label_matrix, feature_matrix, label, method, param
     else:
         rval['name'] = rval['label']
 
-    if train_pos_label_count > 2 and test_pos_label_count > 2:
+    if len(set(train_label_set)) > 1 and train_pos_label_count > 2 and test_pos_label_count > 2:
         lr = method_config[method]['method']( **params )
         lr.fit(train_obs_set, train_label_set)
 
         pred=lr.predict_proba( test_obs_set )
         fpr, tpr, thresholds = metrics.roc_curve(test_label_set, list( a[1] for a in pred ))
-        roc_auc = metrics.auc(fpr, tpr)
+        try:
+            roc_auc = metrics.auc(fpr, tpr)
+        except ValueError:
+            roc_auc = None
 
         predictions = zip( test_label_set, list( a[1] for a in pred ) )
 
@@ -163,13 +166,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--labels", action="append", default=[])
     parser.add_argument("-f", "--features", action="append", default=[])
-    parser.add_argument("-ln", "--labels-named", nargs=2, action="append", default=[])
+    parser.add_argument("-ln", "--labels-named", nargs="*", action="append", default=[])
     parser.add_argument("--transpose", "-t", action="store_true", default=False)
     parser.add_argument("--single", default=None)
     parser.add_argument("--grid", default=None)
     parser.add_argument("--spark-master", "-s", default="local")
     parser.add_argument("--max-cores", default=None)
     parser.add_argument("--folds", type=int, default=10)
+    parser.add_argument("--blocks", type=int, default=None)
     parser.add_argument("--test", action="store_true", default=False)
     parser.add_argument("-o", "--out", default="models")
 
@@ -187,33 +191,37 @@ if __name__ == "__main__":
 
     for l in args.labels:
         label_files.append( (None, os.path.abspath(l)) )
-    for lname, l in args.labels_named:
-        label_files.append( (lname, (l)) )
+    for lset in args.labels_named:
+        lname = lset[0]
+        for l in lset[1:]:
+            label_files.append( (lname, (l)) )
 
     for f in args.features:
         feature_files.append(os.path.abspath(f))
 
     #grid: label_prefix, label, label_file_path, feature_file_path
     grid = []
-    for label_prefix, label_path in label_files:
-        logging.info("Scanning: %s" % (label_path))
-        label_matrix = pandas.read_csv(label_path, sep="\t", index_col=0)
+    for feature_path in feature_files:
+        logging.info("Scanning: %s" % (feature_path))
+        feature_matrix = pandas.read_csv(feature_path, sep="\t", index_col=0)
         if args.transpose:
-            label_matrix = label_matrix.transpose()
-        for feature_path in feature_files:
-            logging.info("Scanning: %s" % (feature_path))
-            feature_matrix = pandas.read_csv(feature_path, sep="\t", index_col=0)
+            feature_matrix = feature_matrix.transpose()
+
+        for label_prefix, label_path in label_files:
+            logging.info("Scanning: %s" % (label_path))
+            label_matrix = pandas.read_csv(label_path, sep="\t", index_col=0)
             if args.transpose:
-                feature_matrix = feature_matrix.transpose()
+                label_matrix = label_matrix.transpose()
+
             sample_intersect = label_matrix.index.intersection(feature_matrix.index)
             if len(sample_intersect) > 5:
-                label_set = []
-                for l in label_matrix.columns:
-                    logging.info("Checking: %s" % (l))
-                    if args.single is None or l == args.single:
-                        if sum( numpy.ravel(label_matrix[l] != 0) ) > 20:
-                            label_set.append(l)
-
+                #label_set = []
+                #for l in label_matrix.columns:
+                #    logging.info("Checking: %s" % (l))
+                #    if args.single is None or l == args.single:
+                #        if sum( numpy.ravel(label_matrix[l] != 0) ) > 20:
+                #            label_set.append(l)
+                label_set = label_matrix.columns
 
                 for method in grid_config.get('methods'):
                     logging.info("Setting up: %s" % (method['name']))
@@ -241,14 +249,6 @@ if __name__ == "__main__":
                 print json.dumps(
                     learn_label_path(**learn_request)
                 )
-                """
-                print json.dumps(
-                    learn_label_path(
-                        label_path=label_file_path, feature_path=feature_file_path, label=args.single,
-                        fold=0, fold_count=args.folds, transpose=args.transpose, label_prefix=label_prefix,
-                        penalty=args.penalty, C=args.C )
-                    )
-                """
     else:
         from pyspark import SparkConf, SparkContext
 
@@ -261,7 +261,7 @@ if __name__ == "__main__":
 
         sc = SparkContext(conf = conf)
 
-        label_rdd = sc.parallelize(list(grid), len(grid))
+        label_rdd = sc.parallelize(list(grid), len(grid) if args.blocks is None else args.blocks )
         if args.folds > 0:
             task_rdd = label_rdd.flatMap( lambda x: list( dict_update(x, {"fold" : i, "fold_count" : args.folds}) for i in range(args.folds) + [None] ) )
         else:
