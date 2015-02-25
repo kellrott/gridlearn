@@ -31,6 +31,7 @@ mergeStrategy in assembly <<= (mergeStrategy in assembly) { (old) =>
     case "about.html"     => MergeStrategy.discard
     case "reference.conf" => MergeStrategy.concat
     case "log4j.properties"     => MergeStrategy.concat
+    case "META-INF/services/org.apache.hadoop.fs.FileSystem" => MergeStrategy.concat
     //case PathList("META-INF", "MANIFEST.MF") => MergeStrategy.discard
     case PathList("META-INF", xs @ _*) => MergeStrategy.discard
     case x => MergeStrategy.first

@@ -55,7 +55,7 @@ object JettyLauncher {
   */
   JSON_MAPPER.registerModule(JSON_MODULE)
 
-  var model_db : RDD[(String, Series[String,Double], java.util.Map[String,AnyRef])] = null
+  var model_db : RDD[Signature] = null
 
   def main(args: Array[String]) {
 
@@ -74,7 +74,13 @@ object JettyLauncher {
       new ObjectMapper().readValue(x, classOf[java.util.Map[String,AnyRef]])
     }).filter(_.containsKey("coef")).map( x => {
       val coef = x.get("coef").asInstanceOf[java.util.Map[String,Double]].asScala.toList
-      (x.get("label").asInstanceOf[String], Series( coef :_* ), x.get("params").asInstanceOf[java.util.Map[String,AnyRef]])
+
+      new Signature(
+        label=x.get("label").asInstanceOf[String],
+        method=x.get("method").asInstanceOf[String],
+        coef=Series( coef :_* ),
+        params=x.get("params").asInstanceOf[java.util.Map[String,Any]].asScala.toMap
+      )
     }).coalesce(100).persist(StorageLevel.MEMORY_AND_DISK_SER)
     println("Database Size: " + model_db.count())
     //setup the server
@@ -95,42 +101,39 @@ object JettyLauncher {
       override def doPost(request: HttpServletRequest, response: HttpServletResponse ) = {
         response.setContentType("text/html")
         response.setStatus(HttpServletResponse.SC_OK)
-        val sig = request.getReader.readLine()
-        val overlap_a = request.getParameterValues("minoverlap")
-        val overlap = if (overlap_a.length > 0) {
-          overlap_a(0).toInt
-        } else {
-          0L
-        }
+        val request_text = request.getReader.readLine()
+        val request_data = new ObjectMapper().readValue(request_text, classOf[java.util.Map[String,Any]]).asScala
 
-        val data = new ObjectMapper().readValue(sig, classOf[java.util.Map[String,Double]]).asScala.toList
-        val query = Series(data:_*)
+        val overlap = request_data.getOrElse("overlap", "1").toString.toInt
+        val limit = request_data.getOrElse("limit", "100").toString.toInt
+        val weights = request_data("weights").asInstanceOf[java.util.Map[String,Double]].asScala
+        val query = Series(weights.toSeq:_*)
+
         val search = model_db.map( x => {
-          val common = query.index.intersect(x._2.index)
+          val common = query.index.intersect(x.coef.index)
           val nquery = query.reindex(common.index).values
-          val nelement = x._2.reindex(common.index).values
+          val nelement = x.coef.reindex(common.index).values
           if (common.index.length > overlap) {
             val corr_val = new PearsonsCorrelation().correlation(nquery.toSeq.toArray, nelement.toSeq.toArray)
-            (x._1, corr_val, nelement.zipMap(common.index.toVec)( (y,z) => (z,y)).toSeq.toMap,
-              Map( "size" -> x._2.length, "params" -> x._3, "coef" -> x._2.toSeq.toMap ))
+            new SignatureHit( x, corr_val, common.index.length )
           } else {
-            (x._1, Double.NaN, nelement.zipMap(common.index.toVec)( (y,z) => (z,y)).toSeq.toMap,
-              Map( "size" -> x._2.length ) )
+            null.asInstanceOf[SignatureHit]
           }
-        } ).filter( ! _._2.isNaN ).sortBy( x => -x._2 )
+        } ).filter( _ != null ).sortBy( x => -x.score )
         val outstream = response.getOutputStream
         val out = JSON_FACTORY.createGenerator(outstream)
-        search.take(100).foreach( x => {
-          val m = Map(
-            "label" -> x._1,
-            "score" -> x._2,
-            "values" -> x._3.asJava,
-            "signature" -> x._4.asJava
-          ).asJava
-          out.writeObject(m)
-          outstream.write("\n".getBytes)
-        }
-        )
+        out.writeStartObject()
+        out.writeObjectField("query", request_data.asJava)
+        out.writeObjectFieldStart("signatureWeights")
+        search.take(limit).foreach( x => {
+          out.writeObjectFieldStart(x.signature.label)
+          x.signature.coef.toSeq.foreach( y => out.writeObjectField(y._1, y._2) )
+          out.writeEndObject()
+        })
+        out.writeEndObject()
+        out.writeEndObject()
+        out.flush()
+        outstream.flush()
       }
     }
 
