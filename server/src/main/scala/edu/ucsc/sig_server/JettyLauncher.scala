@@ -107,15 +107,28 @@ object JettyLauncher {
         val overlap = request_data.getOrElse("overlap", "1").toString.toInt
         val limit = request_data.getOrElse("limit", "100").toString.toInt
         val weights = request_data("weights").asInstanceOf[java.util.Map[String,Double]].asScala
+        val method = request_data.getOrElse("method", "dot").toString
+        val normalize = request_data.getOrElse("normalize", true).asInstanceOf[Boolean]
+
         val query = Series(weights.toSeq:_*)
 
         val search = model_db.map( x => {
           val common = query.index.intersect(x.coef.index)
           val nquery = query.reindex(common.index).values
-          val nelement = x.coef.reindex(common.index).values
+          val nelement = if (normalize) {
+            ((x.coef - x.coef.min.get) / x.coef.max.get).reindex(common.index).values
+          } else {
+            x.coef.reindex(common.index).values
+          }
           if (common.index.length > overlap) {
-            val corr_val = new PearsonsCorrelation().correlation(nquery.toSeq.toArray, nelement.toSeq.toArray)
-            new SignatureHit( x, corr_val, common.index.length )
+            val score = if (method == "corr")
+              new PearsonsCorrelation().correlation(nquery.toSeq.toArray, nelement.toSeq.toArray)
+            else
+              nquery.dot(nelement)
+            if (score.isNaN)
+              null.asInstanceOf[SignatureHit]
+            else
+              new SignatureHit( x, score, common.index.length )
           } else {
             null.asInstanceOf[SignatureHit]
           }
