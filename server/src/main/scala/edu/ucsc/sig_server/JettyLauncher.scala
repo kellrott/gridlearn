@@ -23,6 +23,8 @@ import org.apache.commons.math3.stat.correlation.SpearmansCorrelation
 
 import org.saddle.{Vec, Series}
 
+import scala.collection.mutable
+
 object JettyLauncher {
 
   var sc : SparkContext = null
@@ -105,7 +107,8 @@ object JettyLauncher {
         val request_data = new ObjectMapper().readValue(request_text, classOf[java.util.Map[String,Any]]).asScala
 
         val overlap = request_data.getOrElse("overlap", "1").toString.toInt
-        val limit = request_data.getOrElse("limit", "100").toString.toInt
+        val sample_limit = request_data.getOrElse("sample_limit", "100").toString.toInt
+        val feature_limit = request_data.getOrElse("feature_limit", "100").toString.toInt
         val weights = request_data("weights").asInstanceOf[java.util.Map[String,Double]].asScala
         val method = request_data.getOrElse("method", "dot").toString
         val normalize = request_data.getOrElse("normalize", true).asInstanceOf[Boolean]
@@ -116,33 +119,53 @@ object JettyLauncher {
           val common = query.index.intersect(x.coef.index)
           val nquery = query.reindex(common.index).values
           val nelement = if (normalize) {
-            ((x.coef - x.coef.min.get) / x.coef.max.get).reindex(common.index).values
+            val n = x.coef.values.map(_.abs).max.get
+            (x.coef / n ).reindex(common.index).values
           } else {
             x.coef.reindex(common.index).values
           }
-          if (common.index.length > overlap) {
+          if (common.index.length >= overlap) {
             val score = if (method == "corr")
               new PearsonsCorrelation().correlation(nquery.toSeq.toArray, nelement.toSeq.toArray)
             else
               nquery.dot(nelement)
-            if (score.isNaN)
-              null.asInstanceOf[SignatureHit]
-            else
-              new SignatureHit( x, score, common.index.length )
+              if (score.isNaN)
+                null.asInstanceOf[SignatureHit]
+              else
+                new SignatureHit( x, score, common.index.length )
           } else {
             null.asInstanceOf[SignatureHit]
           }
         } ).filter( _ != null ).sortBy( x => -x.score )
         val outstream = response.getOutputStream
         val out = JSON_FACTORY.createGenerator(outstream)
+        val hits = search.take(sample_limit)
+
+        val features = hits.foldRight(mutable.HashMap[String,Double]())( (x,y) => {
+          x.signature.coef.toSeq.foreach( z => {
+            y(z._1) = y.getOrElse(z._1, 0.0) + z._2.abs
+          })
+          y
+        } )
+
         out.writeStartObject()
         out.writeObjectField("query", request_data.asJava)
+        out.writeObjectFieldStart("features")
+        features.toSeq.sortBy( y => -y._2.abs ).take(feature_limit).foreach( y => out.writeObjectField(y._1, y._2  - (y._2 % 0.001)))
+        out.writeEndObject()
         out.writeObjectFieldStart("signatures")
-        search.take(limit).foreach( x => {
+        hits.foreach( x => {
           out.writeObjectFieldStart(x.signature.label)
           out.writeNumberField("score", x.score)
           out.writeObjectFieldStart("weights")
-          x.signature.coef.toSeq.foreach( y => out.writeObjectField(y._1, y._2) )
+          val sig = x.signature
+          val coef = if (normalize) {
+            val n = sig.coef.values.map(_.abs).max.get
+            (x.signature.coef / n)
+          } else {
+            sig.coef
+          }
+          coef.toSeq.sortBy( y => -y._2.abs ).take(feature_limit).foreach( y => out.writeObjectField(y._1, y._2  - (y._2 % 0.001)))
           out.writeEndObject()
           out.writeEndObject()
         })
