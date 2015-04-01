@@ -61,26 +61,27 @@ def learn_partition(partition):
     for task in partition:
         if task['label_path'] != cur_label_path:
             cur_label_matrix = pandas.read_csv(task['label_path'], sep="\t", index_col=0)
-            if task['transpose']:
+            if task['label_transpose']:
                 cur_label_matrix = cur_label_matrix.transpose()
             cur_label_path = task['label_path']
         if task['feature_path'] != cur_feature_path:
             cur_feature_matrix = pandas.read_csv(task['feature_path'], sep="\t", index_col=0)
-            if task['transpose']:
+            if task['feature_transpose']:
                 cur_feature_matrix = cur_feature_matrix.transpose()
             cur_feature_path = task['feature_path']
         yield learn_label(
             label_matrix=cur_label_matrix,
             feature_matrix=cur_feature_matrix,
-            **dict_remove(task, ["transpose", "feature_path", "label_path"]))
+            **dict_remove(task, ["label_transpose", "feature_transpose", "feature_path", "label_path"]))
 
 
-def learn_label_path(label_prefix, label_path, feature_path, label, method, params, fold=None, fold_count=None, transpose=False):
+def learn_label_path(label_prefix, label_path, feature_path, label, method, params, fold=None, fold_count=None, label_transpose=False, feature_transpose=False):
     feature_matrix = pandas.read_csv(feature_path, sep="\t", index_col=0).fillna(0.0)
     label_matrix = pandas.read_csv(label_path, sep="\t", index_col=0)
 
-    if transpose:
+    if feature_transpose:
         feature_matrix = feature_matrix.transpose()
+    if label_transpose:
         label_matrix = label_matrix.transpose()
 
     return learn_label(label_prefix=label_prefix,
@@ -162,12 +163,31 @@ def learn_label(label_prefix, label_matrix, feature_matrix, label, method, param
 
     return rval
 
+def reduce_folds(folds):
+    out = None
+    for f in folds:
+        if 'fold' not in f:
+            out = f
+    if out is None:
+        return out
+    out['fold_roc_auc'] = list( f['roc_auc'] for f in folds if 'fold' in f )
+    out['fold_pr_auc'] = list( f['pr_auc'] for f in folds if 'fold' in f )
+    return out
+
+
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--labels", action="append", default=[])
+    parser.add_argument("-tl", "--trans-labels", action="append", default=[])
     parser.add_argument("-f", "--features", action="append", default=[])
+    parser.add_argument("-tf", "--trans-features", action="append", default=[])
     parser.add_argument("-ln", "--labels-named", nargs="*", action="append", default=[])
-    parser.add_argument("--transpose", "-t", action="store_true", default=False)
+    parser.add_argument("-tln", "--trans-labels-named", nargs="*", action="append", default=[])
+
+    parser.add_argument("-m", "--label-min", type=int, default=0)
+
     parser.add_argument("--single", default=None)
     parser.add_argument("--grid", default=None)
     parser.add_argument("--spark-master", "-s", default="local")
@@ -176,6 +196,7 @@ if __name__ == "__main__":
     parser.add_argument("--blocks", type=int, default=None)
     parser.add_argument("--test", action="store_true", default=False)
     parser.add_argument("-o", "--out", default="models")
+    parser.add_argument("--limit", type=int, default=None)
 
     args = parser.parse_args()
     args.out = os.path.abspath(args.out)
@@ -190,27 +211,37 @@ if __name__ == "__main__":
     feature_files = []
 
     for l in args.labels:
-        label_files.append( (None, os.path.abspath(l)) )
+        label_files.append( (None, os.path.abspath(l), False) )
+    for l in args.trans_labels:
+        label_files.append( (None, os.path.abspath(l), True) )
+
     for lset in args.labels_named:
         lname = lset[0]
         for l in lset[1:]:
-            label_files.append( (lname, (l)) )
+            label_files.append( (lname, (l), False) )
+    for lset in args.trans_labels_named:
+        lname = lset[0]
+        for l in lset[1:]:
+            label_files.append( (lname, (l), True) )
+
 
     for f in args.features:
-        feature_files.append(os.path.abspath(f))
+        feature_files.append( (os.path.abspath(f), False) )
+    for f in args.trans_features:
+        feature_files.append( (os.path.abspath(f), True) )
 
     #grid: label_prefix, label, label_file_path, feature_file_path
     grid = []
-    for feature_path in feature_files:
+    for feature_path, feature_transpose in feature_files:
         logging.info("Scanning: %s" % (feature_path))
         feature_matrix = pandas.read_csv(feature_path, sep="\t", index_col=0)
-        if args.transpose:
+        if feature_transpose:
             feature_matrix = feature_matrix.transpose()
 
-        for label_prefix, label_path in label_files:
+        for label_prefix, label_path, label_transpose in label_files:
             logging.info("Scanning: %s" % (label_path))
             label_matrix = pandas.read_csv(label_path, sep="\t", index_col=0)
-            if args.transpose:
+            if label_transpose:
                 label_matrix = label_matrix.transpose()
 
             sample_intersect = label_matrix.index.intersection(feature_matrix.index)
@@ -231,17 +262,26 @@ if __name__ == "__main__":
                         'feature_path' : feature_path,
                         'method' : method['name'],
                         'params' : method.get('params', {}),
-                        'transpose' : args.transpose
+                        'feature_transpose' : feature_transpose,
+                        'label_transpose' : label_transpose
                     }
                     for l in label_set:
-                        n = dict(method)
-                        n['label'] = l
-                        grid.append(n)
+                        include = True
+                        for c in label_matrix[l].value_counts():
+                            if c < args.label_min:
+                                include = False
+                        if include:
+                            n = dict(method)
+                            n['label'] = l
+                            grid.append(n)
 
     if args.test:
         for line in grid:
-            print line
+            print json.dumps( line )
         sys.exit(0)
+
+    if args.limit is not None:
+        grid = grid[:args.limit]
 
     if args.single:
         for learn_request in grid:
@@ -268,9 +308,16 @@ if __name__ == "__main__":
             task_rdd = label_rdd
 
         #rdd format: label_prefix, label, label_file_path, feature_file_path, fold_number
-        counts = task_rdd.mapPartitions(
+        results = task_rdd.mapPartitions(
             lambda x: learn_partition(
                 partition=x)
-            )
+        ).filter(
+            lambda x: 'method' in x
+        ).map(
+            lambda x: ("%s:%s:%s" % (x['label'], x['method'], x['params']), x)
+        ).groupByKey().map(
+            lambda x: reduce_folds(x[1])
+        )
 
-        counts.map( json.dumps ).saveAsTextFile(args.out)
+
+        results.map( json.dumps ).saveAsTextFile(args.out)
